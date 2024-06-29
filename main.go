@@ -14,12 +14,19 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type User struct {
-	// Id       int    `json:"id"`
 	Username string `json:"username" validate:"required,min=5,max=20"`
 	Password string `json:"password" validate:"required,min=8"`
+}
+
+type Iuran struct {
+	Nama  string `json:"nama" validate:"required"`
+	Bulan string `json:"bulan" validate:"required"`
+	Date  string `json:"date" validate:"required,oneof='Minggu 1' 'Minggu 2' 'Minggu 3' 'Minggu 4'"`
+	Nilai string `json:"nilai" validate:"required"`
 }
 
 type Claims struct {
@@ -28,6 +35,19 @@ type Claims struct {
 }
 
 var db *sql.DB
+
+func hashPassword(password string, cost int) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), cost)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
 
 func generateRandomKey(length int) ([]byte, error) {
 	key := make([]byte, length)
@@ -54,8 +74,13 @@ func main() {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/daftar", SignupHandler).Methods("POST")
-
 	r.HandleFunc("/login", SigninHandler).Methods("POST")
+	// r.HandleFunc("/dashboard", DashboardHandler).Methods("GET")
+	r.HandleFunc("/iuran", IuranHandler).Methods("POST")
+	r.HandleFunc("/iuran/nama/{nama}", IuranHandler).Methods("GET")
+	r.HandleFunc("/iuran/bulan/{bulan}", IuranHandler).Methods("GET")
+	r.HandleFunc("/iuran/date/{date}", IuranHandler).Methods("GET")
+	r.HandleFunc("/iuran/{no}", IuranHandler).Methods("PUT")
 
 	corsMiddleware := handlers.CORS(
 		handlers.AllowedOrigins([]string{"*"}),
@@ -74,28 +99,27 @@ func SignupHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		log.Println("Error decoding JSON:", err)
-		http.Error(w, `{"error": "Invalid JSON format"}`, http.StatusBadRequest)
+		http.Error(w, `{"Error Message": "Invalid JSON format"}`, http.StatusBadRequest)
 		return
 	}
 
 	err = validate.Struct(user)
 	if err != nil {
 		log.Println("Validation error:", err)
-
-		if len(user.Password) < 8 {
-			http.Error(w, `{"error": "Minimal password terdiri 8 digit"}`, http.StatusBadRequest)
-			return
-		} else {
-			http.Error(w, `{"error": "Invalid input data"}`, http.StatusBadRequest)
-			return
-		}
+		http.Error(w, `{"Error Message": "Invalid input data"}`, http.StatusBadRequest)
+		return
 	}
 
-	fmt.Printf("User baru: %+v\n", user)
-
-	_, err = db.Exec("INSERT INTO Admin (username, password) VALUES ( ?, ?)", user.Username, user.Password)
+	hashedPassword, err := hashPassword(user.Password, 14)
 	if err != nil {
-		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+		log.Println("Error hashing password:", err)
+		http.Error(w, `{"Error Message": "Error processing request"}`, http.StatusInternalServerError)
+		return
+	}
+
+	_, err = db.Exec("INSERT INTO Admin (username, password) VALUES (?, ?)", user.Username, hashedPassword)
+	if err != nil {
+		http.Error(w, `{"Error Message": "`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
 
@@ -109,27 +133,27 @@ func SigninHandler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		log.Println("Error decoding JSON:", err)
-		http.Error(w, `{"error": "Invalid JSON format"}`, http.StatusBadRequest)
+		http.Error(w, `{"Error Message": "Invalid JSON format"}`, http.StatusBadRequest)
 		return
 	}
 
-	//validasi dari isi struct
 	err = validate.Struct(user)
 	if err != nil {
 		log.Println("Validation error:", err)
-		http.Error(w, `{"error": "Invalid input data"}`, http.StatusBadRequest)
+		http.Error(w, `{"Error Message": "Invalid input data"}`, http.StatusBadRequest)
 		return
 	}
 
 	var storedPassword string
 	err = db.QueryRow("SELECT password FROM Admin WHERE username = ?", user.Username).Scan(&storedPassword)
 	if err != nil {
-		http.Error(w, `{"error": "Invalid username or password"}`, http.StatusUnauthorized)
+		log.Println("Error retrieving password from database:", err)
+		http.Error(w, `{"Error Message": "Invalid username or password"}`, http.StatusUnauthorized)
 		return
 	}
 
-	if user.Password != storedPassword {
-		http.Error(w, `{"error": "Invalid username or password"}`, http.StatusUnauthorized)
+	if !checkPasswordHash(user.Password, storedPassword) {
+		http.Error(w, `{"Error Message": "Invalid username or password"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -144,11 +168,15 @@ func SigninHandler(w http.ResponseWriter, r *http.Request) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	jwtKey, err := generateRandomKey(32)
 	if err != nil {
-		panic(err.Error())
+		log.Println("Error generating JWT key:", err)
+		http.Error(w, `{"Error Message": "Error processing request"}`, http.StatusInternalServerError)
+		return
 	}
+
 	tokenString, err := token.SignedString(jwtKey)
 	if err != nil {
-		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+		log.Println("Error signing JWT token:", err)
+		http.Error(w, `{"Error Message": "Error processing request"}`, http.StatusInternalServerError)
 		return
 	}
 
@@ -157,9 +185,181 @@ func SigninHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"token": "` + tokenString + `", "redirect": "dashboard"}`))
 }
 
-func AddIuranHandler(w http.ResponseWriter, r *http.Request) {
+func IuranHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Create new iuran
+		var iuran Iuran
 
-}
-func GetIuranHandler(w http.ResponseWriter, r *http.Request) {
+		err := json.NewDecoder(r.Body).Decode(&iuran)
+		if err != nil {
+			log.Println("Error decoding JSON:", err)
+			http.Error(w, `{"Error Message": "Invalid JSON format"}`, http.StatusBadRequest)
+			return
+		}
 
+		err = validate.Struct(iuran)
+		if err != nil {
+			log.Println("Validation error:", err)
+			http.Error(w, `{"Error Message": "Invalid input data"}`, http.StatusBadRequest)
+			return
+		}
+
+		_, err = db.Exec("INSERT INTO Iuran (nama, bulan, date, nilai) VALUES (?, ?, ?, ?)", iuran.Nama, iuran.Bulan, iuran.Date, iuran.Nilai)
+		if err != nil {
+			http.Error(w, `{"Error Message": "`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message": "Iuran added successfully"}`))
+
+	case "GET":
+		// Get iuran
+		vars := mux.Vars(r)
+		nama, namaExists := vars["nama"]
+		bulan, bulanExists := vars["bulan"]
+		date, dateExists := vars["date"]
+
+		if namaExists {
+			rows, err := db.Query("SELECT nama, bulan, date, nilai FROM Iuran WHERE nama = ?", nama)
+			if err != nil {
+				http.Error(w, `{"error": "Error fetching data"}`, http.StatusInternalServerError)
+				return
+			}
+			defer rows.Close()
+
+			var nama []Iuran
+			for rows.Next() {
+				var iuran Iuran
+				err := rows.Scan(&iuran.Nama, &iuran.Bulan, &iuran.Date, &iuran.Nilai)
+				if err != nil {
+					http.Error(w, `{"error": "Error scanning data"}`, http.StatusInternalServerError)
+					return
+				}
+				nama = append(nama, iuran)
+			}
+
+			err = rows.Err()
+			if err != nil {
+				http.Error(w, `{"error": "Error with rows"}`, http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(nama)
+		} else if bulanExists {
+			rows, err := db.Query("select nama, bulan, date, nilai from Iuran where bulan = ?", bulan)
+			if err != nil {
+				http.Error(w, `{"error": "Error fetching data"}`, http.StatusInternalServerError)
+				return
+			}
+			defer rows.Close()
+
+			var bulan []Iuran
+			for rows.Next() {
+				var iuran Iuran
+				err := rows.Scan(&iuran.Nama, &iuran.Bulan, &iuran.Date, &iuran.Nilai)
+				if err != nil {
+					http.Error(w, `{"error": "Error scanning data"}`, http.StatusInternalServerError)
+					return
+				}
+				bulan = append(bulan, iuran)
+			}
+			err = rows.Err()
+			if err != nil {
+				http.Error(w, `{"error": "Error with rows"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(bulan)
+
+		} else if dateExists {
+			log.Println("Fetching data for date:", date)
+			rows, err := db.Query("select nama, bulan, date, nilai from Iuran where date = ?", date)
+			if err != nil {
+				http.Error(w, `{"Error Message": "Error Fetching data"}`, http.StatusInternalServerError)
+				return
+			}
+			defer rows.Close()
+
+			var date []Iuran
+			for rows.Next() {
+				var iuran Iuran
+				err := rows.Scan(&iuran.Nama, &iuran.Bulan, &iuran.Date, &iuran.Nilai)
+				if err != nil {
+					http.Error(w, `{"Error Message": "Error Fetching data"}`, http.StatusInternalServerError)
+					return
+				}
+
+				date = append(date, iuran)
+			}
+			err = rows.Err()
+			if err != nil {
+				http.Error(w, `{"error": "Error with rows"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(date)
+		} else {
+			rows, err := db.Query("SELECT nama, bulan, date, nilai FROM Iuran")
+			if err != nil {
+				http.Error(w, `{"error": "Error fetching data"}`, http.StatusInternalServerError)
+				return
+			}
+			defer rows.Close()
+
+			var iurans []Iuran
+			for rows.Next() {
+				var iuran Iuran
+				err := rows.Scan(&iuran.Nama, &iuran.Bulan, &iuran.Date, &iuran.Nilai)
+				if err != nil {
+					http.Error(w, `{"error": "Error scanning data"}`, http.StatusInternalServerError)
+					return
+				}
+				iurans = append(iurans, iuran)
+			}
+
+			err = rows.Err()
+			if err != nil {
+				http.Error(w, `{"error": "Error with rows"}`, http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(iurans)
+		}
+	case "PUT":
+		// Update iuran
+		var iuran Iuran
+		params := mux.Vars(r)
+		no := params["no"]
+
+		err := json.NewDecoder(r.Body).Decode(&iuran)
+		if err != nil {
+			log.Println("Error decoding JSON:", err)
+			http.Error(w, `{"error": "Invalid JSON format"}`, http.StatusBadRequest)
+			return
+		}
+
+		err = validate.Struct(iuran)
+		if err != nil {
+			log.Println("Validation error:", err)
+			http.Error(w, `{"error": "Invalid input data"}`, http.StatusBadRequest)
+			return
+		}
+
+		_, err = db.Exec("UPDATE Iuran SET nama = ?, bulan = ?, date = ?, nilai = ? WHERE no = ?", iuran.Nama, iuran.Bulan, iuran.Date, iuran.Nilai, no)
+		if err != nil {
+			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message": "Iuran updated successfully"}`))
+	default:
+		http.Error(w, `{"Error Message": "Kagak ada Method yg lu mau boss..!!"}`, http.StatusMethodNotAllowed)
+	}
 }
